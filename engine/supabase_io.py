@@ -52,7 +52,13 @@ def read_executions() -> list:
     # normalise to the camelCase shape the app and metrics use
     return [{"cardId": r["card_id"], "decision": r["decision"], "fillPrice": r.get("fill_price"),
              "exitPrice": r.get("exit_price"), "units": r.get("units"), "pnlEur": r.get("pnl_eur"),
-             "note": r.get("note"), "updatedAt": r.get("updated_at")} for r in rows]
+             "note": r.get("note"), "updatedAt": r.get("updated_at"), "source": r.get("source") or "user",
+             "reason": r.get("reason")} for r in rows]
+
+
+def upsert_executions(rows: list) -> int:
+    """Insert decision rows that do not exist yet (never overwrites a user's decision)."""
+    return _rpc("engine_insert_executions", {"p_secret": SECRET, "p_rows": rows}) or 0
 
 
 def read_refresh_requests() -> list:

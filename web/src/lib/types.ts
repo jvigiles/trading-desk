@@ -13,10 +13,15 @@ export type Card = {
   created_at: string;
   session_date: string;
   signal_date: string;
-  kind: "futures_day" | "swing";
+  kind: "futures_day" | "swing" | "option_swing";
   setup_id: string;
   setup_name: string;
-  instrument: { symbol: string; name: string; type: string; currency: string; point_value?: number; tick?: number };
+  instrument: { symbol: string; name: string; type: string; currency: string; point_value?: number; tick?: number; multiplier?: number; underlying_type?: string };
+  structure?: StructureId;
+  risk_class?: RiskClass;
+  model_based?: boolean;
+  option?: OptionDetail;
+  alternatives?: AlternativeRow[];
   data_symbol: string;
   side: "long" | "short";
   entry_type: "stop" | "limit";
@@ -70,15 +75,42 @@ export type Card = {
   execution?: ExecutionPlan;
 };
 
+export type StructureId = "shares" | "long_call" | "long_put" | "debit_spread" | "leveraged_etf" | "micro_futures" | "cfd";
+export type RiskClass = "defined" | "stop_based" | "open_ended";
+
+export type OptionDetail = {
+  structure: StructureId; label: string; expiry: string; dte: number; right: "C" | "P";
+  long_strike: number; short_strike: number | null; long_contract: string; short_contract: string | null;
+  long_iv: number; long_delta: number;
+  quote: { long_bid: number; long_ask: number; short_bid: number | null; short_ask: number | null; open_interest: number };
+  debit_per_share: number; premium_usd: number; max_loss_usd: number; max_gain_usd: number | null; breakeven: number;
+  premium_pct_of_capital: number; n_paths: number; p_win: number; win_r: number; loss_r: number; expectancy_r: number; cost_r: number;
+  scenarios_usd: { at_target: number; at_stop: number; flat_at_time_exit: number };
+  payoff_ratio_at_target: number | null;
+};
+
+export type AlternativeRow = {
+  structure: StructureId; label: string; risk_class: RiskClass;
+  capital_usd: number | null; max_loss_usd: number | null; max_loss_note?: string | null; gain_at_target_usd: number | null;
+  p_win: number | null; expectancy_r: number | null; evidence?: string | null; permission?: string | null;
+  generated: boolean; detail?: string | null; fits_budget?: boolean | null; chosen?: boolean | null; note?: string | null;
+};
+
+export type StructureCfg = { label: string; risk_class: RiskClass; generated: boolean; permission: string; note: string };
+export type OptionsBudget = { max_premium_pct: number; max_total_premium_pct: number; max_open: number; min_rr: number; max_premium_eur: number };
+
 export type ExecutionPlan = {
   instrument: { ibkr_symbol: string; contract: string; exchange: string; description: string; search_hint: string };
   order: {
     action: "BUY" | "SELL"; quantity: number; order_type: "STP" | "LMT"; entry_price: number; time_in_force: string;
     attached: { role: "stop_loss" | "take_profit"; action: "BUY" | "SELL"; order_type: "STP" | "LMT"; price: number }[];
     oca: boolean;
+    condition?: string;
+    legs?: { action: "BUY" | "SELL"; right: string; strike: number; expiry: string }[];
   };
-  capital: { notional_usd: number; notional_pct_of_capital: number; risk_usd: number; risk_pct_of_capital: number; tier: string };
-  risk_reward: { stop_distance: number; target_distance: number; ratio: number | null; max_planned_loss_usd: number; planned_gain_usd: number | null; est_costs_usd: number };
+  capital: { notional_usd: number; notional_pct_of_capital: number; risk_usd: number; risk_pct_of_capital: number; tier: string; margin_note?: string };
+  risk_reward: { stop_distance: number; target_distance: number; ratio: number | null; max_planned_loss_usd: number; planned_gain_usd: number | null; est_costs_usd: number;
+    scenarios_usd?: { at_target: number; at_stop: number; flat_at_time_exit: number }; max_gain_usd?: number | null; breakeven?: number | null };
   steps_tws: string[];
   steps_mobile: string[];
   paper_note: string;
@@ -114,6 +146,8 @@ export type TodayView = {
   };
   tiers?: Record<"base" | "tail", TierCfg>;
   pdt_applies?: boolean;
+  structures?: Record<string, StructureCfg>;
+  options_budget?: OptionsBudget;
   _updated_at?: string;
 };
 
@@ -133,6 +167,9 @@ export type Summary = {
 export type Decisions = {
   executed: Summary; skipped: Summary;
   executed_count: number; skipped_count: number; undecided_recommended: number;
+  skipped_auto_count?: number; skipped_user_count?: number; skipped_auto?: Summary; skipped_user?: Summary;
+  skipped_total_rows?: number; skipped_reasons?: Record<string, number>;
+  missed_opportunities?: SkippedRow[]; avoided_losses?: SkippedRow[];
   own_pnl_eur: number; system_pnl_same_cards_eur: number; n_with_own_pnl: number;
   execution_slippage_eur: number | null;
   skipped_winners_r: number; skipped_losers_r: number; net_r_of_skipping: number;
@@ -143,6 +180,8 @@ export type Decisions = {
   bias_flags: { flag: string; text: string }[];
 };
 
+export type SkippedRow = { id: string; symbol: string; name?: string; setup_id: string; session_date: string; r_net: number; pnl_eur: number; source: string; reason?: string | null; status: string };
+
 export type Metrics = {
   generated_at: string;
   recommended: Summary;
@@ -151,6 +190,7 @@ export type Metrics = {
   by_tier?: Record<string, { recommended: Summary; all_tracked: Summary }>;
   by_regime?: Record<string, Summary>;
   by_kind?: Record<string, Summary>;
+  by_structure?: Record<string, { label: string; risk_class: RiskClass; recommended: Summary; all_tracked: Summary }>;
   signal_combos?: ({ combo: string } & Summary)[];
   predicted_vs_realised?: { setup_id: string; n: number; predicted_p: number; observed_p: number; predicted_r: number; observed_r: number }[];
   decisions?: Decisions;
@@ -197,4 +237,6 @@ export type Execution = {
   pnlEur: number | null;
   note: string | null;
   updatedAt: string;
+  source?: "user" | "auto";
+  reason?: string | null;
 };

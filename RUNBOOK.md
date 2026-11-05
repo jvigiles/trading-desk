@@ -33,6 +33,14 @@ snapshots before every run), web app `web/` (Vite, built by the `pages` workflow
 5. Report in one short message: session date, scored outcomes (id → status, R), recommended count by tier, vetoes/proposals, blackout,
    undecided recommended cards. If nothing scored and nothing recommended, say so in one line.
 
+## Structures, options and auto-skip (added 05 Nov 2026)
+
+- Every `SWING_BREAKOUT_RUNNER` signal is also evaluated as a defined-risk option structure (`engine/options.py`): long call/put nearest delta 0.40 and a vertical debit spread with the short strike near the target, 55–100 DTE, from the yfinance chain (delayed). Payoffs are **model-based**: the setup's backtested exit paths (`state.path_samples`, written by `calibrate.py`) priced with Black-Scholes at today's implied volatility, debit re-priced at the trigger level. No historical option prices are used; treat the numbers as estimates.
+- Budget (`config.OPTIONS`): premium ≤ 3% of capital per trade, ≤ 6% total, max 2 open, modelled gain at target ≥ 3× premium. One structure per signal: the higher after-cost expectancy is recommended, the other is tracked in shadow. With €5,000 capital a single contract on XLV/DIA/MSFT/AMZN costs $600–1,800, so these are blocked; cheaper underlyings (price < ~$60) are the realistic candidates.
+- Leveraged ETFs and CFDs are evaluated in the "Ways to express this signal" table but never generated (reasons in `config.STRUCTURES`).
+- Auto-skip: on every run `auto_classify()` marks previously recommended cards from earlier sessions that have no decision and are no longer pending as `skipped` with `source='auto'` and a reason (RPC `engine_insert_executions`, `on conflict do nothing`). User decisions always win; the UI writes `source='user'`.
+- Option execution guides (`execution.build_option`) assume US options permission; spreads need the level that allows spreads. Enable in Client Portal → Settings → Trading Permissions before paper-trading them.
+
 ## Monthly (first weekday)
 `python3 engine/calibrate.py` then `python3 engine/run_daily.py --no-generate`; summarise changelog entries added to the state
 (in-sample vs out-of-sample 2025+ per setup). Tier or size changes are manual decisions with a logged reason, never automatic.

@@ -6,7 +6,7 @@ import { EmptyState, SectionTitle } from "./today";
 import type { Card } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type Filter = "all" | "recommended" | "executed" | "open" | "closed";
+type Filter = "all" | "recommended" | "executed" | "skipped" | "open" | "closed";
 
 export default function Journal() {
   const { data: cards, isLoading } = useQuery<Card[]>({ queryKey: ["/api/cards"] });
@@ -19,6 +19,7 @@ export default function Journal() {
     switch (filter) {
       case "recommended": return all.filter((c) => c.recommended);
       case "executed": return all.filter((c) => byCard.get(c.id)?.decision === "executed");
+      case "skipped": return all.filter((c) => byCard.get(c.id)?.decision === "skipped");
       case "open": return all.filter((c) => c.status === "pending" || c.status === "open");
       case "closed": return all.filter((c) => ["target", "stopped", "expired"].includes(c.status));
       default: return all;
@@ -34,7 +35,7 @@ export default function Journal() {
   if (isLoading) return <div className="space-y-3 p-4"><Skeleton className="h-8 w-full" /><Skeleton className="h-28 w-full rounded-xl" /><Skeleton className="h-28 w-full rounded-xl" /></div>;
 
   const tabs: { k: Filter; l: string }[] = [
-    { k: "all", l: "All" }, { k: "recommended", l: "Recommended" }, { k: "executed", l: "Executed" }, { k: "open", l: "Open" }, { k: "closed", l: "Closed" },
+    { k: "all", l: "All" }, { k: "recommended", l: "Recommended" }, { k: "executed", l: "Executed" }, { k: "skipped", l: "Skipped" }, { k: "open", l: "Open" }, { k: "closed", l: "Closed" },
   ];
 
   return (

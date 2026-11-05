@@ -18,6 +18,8 @@ export type ExecutionRow = {
   pnl_eur: number | null;
   note: string | null;
   updated_at: string;
+  source?: "user" | "auto";
+  reason?: string | null;
 };
 
 export async function readSnapshot<T>(key: string): Promise<{ payload: T; updated_at: string } | null> {
@@ -31,7 +33,7 @@ export async function readExecutions() {
   if (error) throw new Error(error.message);
   return (data as ExecutionRow[]).map((r) => ({
     cardId: r.card_id, decision: r.decision, fillPrice: r.fill_price, exitPrice: r.exit_price,
-    units: r.units, pnlEur: r.pnl_eur, note: r.note, updatedAt: r.updated_at,
+    units: r.units, pnlEur: r.pnl_eur, note: r.note, updatedAt: r.updated_at, source: r.source ?? "user", reason: r.reason ?? null,
   }));
 }
 
@@ -39,6 +41,7 @@ export async function upsertExecution(cardId: string, body: { decision: "execute
   const { error } = await supabase.from("executions").upsert({
     card_id: cardId, decision: body.decision, fill_price: body.fillPrice ?? null, exit_price: body.exitPrice ?? null,
     units: body.units ?? null, pnl_eur: body.pnlEur ?? null, note: body.note ?? null, updated_at: new Date().toISOString(),
+    source: "user", reason: null,
   });
   if (error) throw new Error(error.message);
 }

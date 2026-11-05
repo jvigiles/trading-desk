@@ -35,6 +35,11 @@ def main():
         if p["kind"] != "swing" or p.get("discretionary"):
             continue
         outs = backtest_swing(sid, dd, vix)
+        # keep the gross exit paths of tail setups: options.py prices option structures along them
+        if p.get("tier") == "tail":
+            state.setdefault("path_samples", {})[sid] = [
+                {"r": round(float(o["r"]), 3), "d": int(o["days"]), "s": o["status"], "date": o["date"]}
+                for o in outs if o["status"] not in ("not_triggered", "gap_cancelled")][-600:]
         for o in outs:
             o["r"] = net_r(o, "swing")
         set_priors(state, sid, "all", outs)

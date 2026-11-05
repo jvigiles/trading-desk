@@ -6,8 +6,8 @@ export const fmtNum = (v: number | null | undefined, d = 2) =>
 export const fmtEur = (v: number | null | undefined, d = 0) =>
   v === null || v === undefined ? "–" : `${v < 0 ? "−" : ""}€${Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d })}`;
 
-export const fmtUsd = (v: number | null | undefined, d = 0) =>
-  v === null || v === undefined ? "–" : `${v < 0 ? "−" : ""}$${Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d })}`;
+export const fmtUsd = (v: number | null | undefined, d = 0, signed = false) =>
+  v === null || v === undefined ? "–" : `${v < 0 ? "−" : signed && v > 0 ? "+" : ""}$${Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d })}`;
 
 export const fmtPct = (v: number | null | undefined, d = 0) => (v === null || v === undefined ? "–" : `${(v * 100).toFixed(d)}%`);
 

@@ -43,6 +43,8 @@ def _fmt(x, tick=None):
 
 def build(card: dict) -> dict:
     """Return the execution block for a card."""
+    if card["kind"] == "option_swing":
+        return build_option(card)
     inst, lv, size = card["instrument"], card["levels"], card["size"]
     side = card["side"]
     long = side == "long"
@@ -158,5 +160,84 @@ def build(card: dict) -> dict:
             "Confirm today's daily loss stop has not been hit (see Today → limits).",
             "Confirm the instrument's permissions are enabled in Account Settings → Trading Permissions "
             "(US stocks/ETFs; US futures for MES/MNQ/MGC).",
+        ],
+    }
+
+
+def build_option(card: dict) -> dict:
+    """IBKR walkthrough for a defined-risk option structure (long call/put or vertical debit spread)."""
+    inst, lv, size, o = card["instrument"], card["levels"], card["size"], card["option"]
+    long_side = card["side"] == "long"
+    right_word = "Call" if o["right"] == "C" else "Put"
+    spread = bool(o.get("short_strike"))
+    debit = o["debit_per_share"]
+    prem = o["premium_usd"]
+    exp = date.fromisoformat(o["expiry"]).strftime("%d %b %Y")
+    strikes = f"{o['long_strike']:g}" + (f" / {o['short_strike']:g}" if spread else "")
+    label = ("Bull call spread" if spread and o["right"] == "C" else "Bear put spread" if spread else f"Long {right_word.lower()}")
+    description = (f"{inst['name']} ({inst['symbol']}) option: {label}, expiry {exp}, strike{'s' if spread else ''} {strikes}, "
+                   f"1 contract = 100 shares, USD")
+    contract_line = (f"Buy {o['long_contract']}" + (f" / Sell {o['short_contract']}" if spread else ""))
+    instrument = {
+        "ibkr_symbol": inst["symbol"], "contract": o["long_contract"] if not spread else f"{o['long_contract']} / {o['short_contract']}",
+        "exchange": "SMART (US options)", "description": description,
+        "search_hint": (f"Type {inst['symbol']} in the search box, choose 'Options' (not the stock), open the option chain, pick the "
+                        f"{exp} expiry and the {strikes} {right_word.lower()}{'s' if spread else ''}. OCC contract: {contract_line}."),
+    }
+    order = {
+        "action": "BUY", "quantity": 1, "order_type": "LMT", "entry_price": debit, "time_in_force": "DAY",
+        "attached": [], "oca": False,
+        "condition": f"Place only after {inst['symbol']} trades {'above' if long_side else 'below'} {lv['entry']:.2f} (the underlying trigger).",
+        "legs": ([{"action": "BUY", "right": right_word, "strike": o["long_strike"], "expiry": o["expiry"]}] +
+                 ([{"action": "SELL", "right": right_word, "strike": o["short_strike"], "expiry": o["expiry"]}] if spread else [])),
+    }
+    tws = [
+        f"Wait for the trigger: {inst['symbol']} must trade {'above' if long_side else 'below'} {lv['entry']:.2f} during regular hours "
+        f"(set a price alert in TWS: Alerts → New Alert → {inst['symbol']} last {'>' if long_side else '<'} {lv['entry']:.2f}).",
+        f"Search '{inst['symbol']}' → Options → Option Chain. Select expiry {exp}.",
+        (f"Use the Strategy Builder: Buy the {o['long_strike']:g} {right_word}, Sell the {o['short_strike']:g} {right_word} (same expiry). "
+         f"The combo shows as a {label.lower()} with a net debit." if spread else
+         f"Click the Ask of the {o['long_strike']:g} {right_word} to create a BUY order."),
+        f"Order Type = LMT, Limit Price = {debit:.2f} (net debit per share; you pay up to ${prem:,.0f} plus commission), Quantity = 1, Time in Force = DAY.",
+        f"If the ask is above {debit*1.15:.2f}, do not chase: cancel. The expected value is gone at a higher price.",
+        "Preview → check 'Max loss' equals the debit (defined risk) → Transmit.",
+        f"Management: there is no stop order. Sell the {'spread' if spread else 'option'} at market (or mid) when {inst['symbol']} trades at {lv['stop']:.2f} "
+        f"(partial loss, modelled {o['scenarios_usd']['at_stop']:+,.0f} USD), when it reaches {lv['target']:.2f} "
+        f"(modelled {o['scenarios_usd']['at_target']:+,.0f} USD), or after {lv['horizon_days']} sessions, whichever comes first.",
+        "Set two alerts in TWS for the stop and target levels so you are notified. Never hold into the last two weeks before expiry.",
+    ]
+    mobile = [
+        f"Set a price alert for {inst['symbol']} {'above' if long_side else 'below'} {lv['entry']:.2f} (Watchlist → tap symbol → Alerts).",
+        f"When triggered: search '{inst['symbol']}' → Options → expiry {exp} → {right_word}s → strike {o['long_strike']:g}" +
+        (f"; then use 'Add leg' / Strategy to SELL the {o['short_strike']:g} {right_word} (or place the two legs one after the other, buying first)." if spread else "."),
+        f"Tap Buy → Order type Limit → Limit price {debit:.2f}{' (net debit)' if spread else ''} → Quantity 1 → Time in force Day → Review → Slide to submit.",
+        f"Add alerts for {lv['stop']:.2f} and {lv['target']:.2f}. Sell the position when either prints or after {lv['horizon_days']} sessions.",
+    ]
+    risk_usd = prem
+    return {
+        "instrument": instrument,
+        "order": order,
+        "capital": {
+            "notional_usd": round(prem, 2), "notional_pct_of_capital": round(100 * size.get("notional_pct_of_capital", 0), 1),
+            "risk_usd": round(risk_usd, 2), "risk_pct_of_capital": round(100 * o["premium_pct_of_capital"], 2),
+            "tier": "tail", "margin_note": "No margin: the debit is paid in full. Nothing further can be lost.",
+        },
+        "risk_reward": {
+            "stop_distance": round(abs(lv["entry"] - lv["stop"]), 2), "target_distance": round(abs(lv["target"] - lv["entry"]), 2),
+            "ratio": round(o["payoff_ratio_at_target"], 2) if o.get("payoff_ratio_at_target") is not None else None,
+            "max_planned_loss_usd": round(-prem, 2),
+            "planned_gain_usd": round(o["scenarios_usd"]["at_target"], 2),
+            "est_costs_usd": round(o["cost_r"] * prem, 2),
+            "scenarios_usd": o["scenarios_usd"], "max_gain_usd": o.get("max_gain_usd"), "breakeven": o.get("breakeven"),
+        },
+        "steps_tws": tws, "steps_mobile": mobile,
+        "paper_note": ("Paper accounts fill option limit orders when the quote trades through the limit; option quotes are "
+                       "delayed 15 minutes in this app, so check the live bid/ask in IBKR before placing the order."),
+        "pre_checks": [
+            "Confirm the account selector shows the PAPER account (badge 'Paper' / account id starting with DU).",
+            f"Confirm US options trading permission is enabled{' at a level that allows spreads' if spread else ''} "
+            "(Client Portal → Settings → Trading Permissions → Options → United States).",
+            "Confirm you can afford to lose the whole premium: that is the defined maximum loss of this trade.",
+            "Check the live bid/ask: this card was built from delayed quotes.",
         ],
     }

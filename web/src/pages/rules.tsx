@@ -7,6 +7,8 @@ export default function Rules() {
   const { data } = useQuery<TodayView | null>({ queryKey: ["/api/today"] });
   const L = data?.limits;
   const T = data?.tiers;
+  const O = data?.options_budget;
+  const S = data?.structures;
   return (
     <div className="space-y-5 p-4">
       <h1 className="text-lg font-semibold">Rules and limits</h1>
@@ -23,7 +25,10 @@ export default function Rules() {
           ["Daily loss stop", L ? `${fmtEur(L.max_daily_loss_eur)} realised → no new trades today` : "2%"],
           ["Weekly loss stop", L ? `${fmtEur(L.max_weekly_loss_eur)} realised → paper only until review` : "4%"],
           ["Recommendation threshold", L ? `expectancy ≥ +${L.min_expectancy_r.toFixed(2)}R after costs` : "+0.10R"],
-          ["Leverage on swings", "none; notional ≤ capital"],
+          ["Options (tail only)", O ? `defined-risk structures only (long call / put, debit spread); premium ≤ ${(O.max_premium_pct * 100).toFixed(0)}% of capital (${fmtEur(O.max_premium_eur)}) per trade, ≤ ${(O.max_total_premium_pct * 100).toFixed(0)}% total, max ${O.max_open} open, modelled gain at target ≥ ${O.min_rr}× premium. Premium is the maximum loss.` : "defined-risk structures only"],
+          ["One structure per signal", "shares or the option structure, never both; the higher after-cost expectancy is recommended, the other is tracked in shadow"],
+          ["Auto-skip", "a recommendation you neither executed nor marked is marked 'Skipped (auto)' once it is no longer valid or drops out of the current recommendations"],
+          ["Leverage on swings", "none in shares; notional ≤ capital. Leveraged ETFs and CFDs are evaluated but not proposed (see below)"],
           ["Max cards per day", "2 futures + 2 swing"],
           ["Overnight futures", "never from a day card"],
           ["Macro blackout", "no futures day cards on NFP, CPI, FOMC days"],
@@ -31,6 +36,25 @@ export default function Rules() {
           ["Quota", "none. Zero recommendations is a valid day; nothing is generated to fill a slot."],
         ]} />
       </section>
+
+      {S && (
+        <section>
+          <SectionTitle title="Instrument structures" hint="How each way of expressing a signal is treated, and the IBKR permission it needs." />
+          <div className="divide-y divide-border/60 rounded-xl border border-card-border bg-card">
+            {["shares", "long_call", "long_put", "debit_spread", "micro_futures", "leveraged_etf", "cfd"].filter((k) => S[k]).map((k) => { const v = S[k]; return (
+              <div key={k} className="p-3 text-sm">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="font-medium">{v.label}</span>
+                  <span className={`rounded-full border px-2 py-0.5 text-xs ${v.risk_class === "defined" ? "border-emerald-500/25 bg-emerald-500/12 text-emerald-700 dark:text-emerald-300" : v.risk_class === "open_ended" ? "border-rose-500/25 bg-rose-500/12 text-rose-700 dark:text-rose-300" : "border-border bg-muted text-muted-foreground"}`}>{v.risk_class === "defined" ? "Defined risk" : v.risk_class === "open_ended" ? "Loss can exceed stake" : "Stop-based"}</span>
+                  <span className="rounded-full border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground">{v.generated ? "Proposed by the engine" : "Evaluated, not proposed"}</span>
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">{v.note}</p>
+                <p className="mt-1 text-xs text-muted-foreground">IBKR permission: {v.permission}</p>
+              </div>
+            ); })}
+          </div>
+        </section>
+      )}
 
       <section>
         <SectionTitle title="Daily routine (CET)" />

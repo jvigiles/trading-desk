@@ -98,6 +98,27 @@ export default function Performance() {
               <div>Long / short: <span className="mono text-foreground">{fmtPct(d.skip_rate_by_side.long)} / {fmtPct(d.skip_rate_by_side.short)}</span></div>
               <div>Day / swing: <span className="mono text-foreground">{fmtPct(d.skip_rate_by_kind.futures_day)} / {fmtPct(d.skip_rate_by_kind.swing)}</span></div>
             </div>
+            {(d.skipped_total_rows ?? 0) > 0 && (
+              <div className="mt-3 border-t border-border/60 pt-3" data-testid="skipped-breakdown">
+                <div className="flex items-baseline justify-between"><h4 className="text-xs font-semibold">Skipped trades and hypothetical outcomes</h4><span className="mono text-xs text-muted-foreground">{d.skipped_user_count ?? 0} by you · {d.skipped_auto_count ?? 0} <Term k="auto_skip">auto</Term></span></div>
+                <div className="mt-2 grid grid-cols-2 gap-3">
+                  <Stat label="Skipped by you" value={fmtR(d.skipped_user?.avg_r ?? null)} sub={`avg R · n=${d.skipped_user?.n ?? 0} scored · ${fmtEur(d.skipped_user?.pnl_eur ?? 0)}`} />
+                  <Stat label="Auto-skipped" value={fmtR(d.skipped_auto?.avg_r ?? null)} sub={`avg R · n=${d.skipped_auto?.n ?? 0} scored · ${fmtEur(d.skipped_auto?.pnl_eur ?? 0)}`} />
+                </div>
+                {d.skipped_reasons && Object.keys(d.skipped_reasons).length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1">{Object.entries(d.skipped_reasons).map(([r, n]) => <span key={r} className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">{r} · {n}</span>)}</div>
+                )}
+                {(d.missed_opportunities?.length ?? 0) > 0 && (
+                  <div className="mt-2"><div className="text-xs text-muted-foreground">Would have won</div>
+                    <ul className="mt-1 space-y-1">{d.missed_opportunities!.slice(0, 5).map((r) => <li key={r.id} className="flex items-baseline justify-between gap-2 text-xs"><span className="truncate"><span className="mono font-medium">{r.symbol}</span> {r.name ? <span className="text-muted-foreground">{r.name} · </span> : null}<span className="text-muted-foreground">{fmtDate(r.session_date)} · {r.source === "auto" ? "auto" : "you"}</span></span><span className="mono shrink-0 text-emerald-600 dark:text-emerald-400">{fmtR(r.r_net)} · {fmtEur(r.pnl_eur)}</span></li>)}</ul></div>
+                )}
+                {(d.avoided_losses?.length ?? 0) > 0 && (
+                  <div className="mt-2"><div className="text-xs text-muted-foreground">Would have lost</div>
+                    <ul className="mt-1 space-y-1">{d.avoided_losses!.slice(0, 5).map((r) => <li key={r.id} className="flex items-baseline justify-between gap-2 text-xs"><span className="truncate"><span className="mono font-medium">{r.symbol}</span> {r.name ? <span className="text-muted-foreground">{r.name} · </span> : null}<span className="text-muted-foreground">{fmtDate(r.session_date)} · {r.source === "auto" ? "auto" : "you"}</span></span><span className="mono shrink-0 text-rose-600 dark:text-rose-400">{fmtR(r.r_net)} · {fmtEur(r.pnl_eur)}</span></li>)}</ul></div>
+                )}
+                <p className="mt-2 text-[11px] text-muted-foreground">Hypothetical: scored by the system at the card's own levels as if the trade had been taken at planned size.</p>
+              </div>
+            )}
             <ul className="mt-3 space-y-1.5">
               {d.bias_flags.map((b, i) => (
                 <li key={i} className={`flex gap-2 rounded-md px-2 py-1.5 text-xs ${b.flag === "insufficient_data" ? "bg-muted/60 text-muted-foreground" : "border border-amber-500/40 bg-amber-500/5"}`} data-testid={`bias-${b.flag}`}>
@@ -124,6 +145,29 @@ export default function Performance() {
                 </div>
               </div>
             ))}
+          </div>
+        </section>
+      )}
+
+      {m.by_structure && Object.keys(m.by_structure).length > 0 && (
+        <section>
+          <SectionTitle title="By structure" hint={<>Shares, <Term k="defined_risk">defined-risk</Term> option structures and margined futures judged separately. R = stop distance for shares and futures, premium for options.</>} />
+          <div className="overflow-hidden rounded-xl border border-card-border bg-card">
+            <table className="w-full text-xs">
+              <thead className="bg-muted/60 text-left text-muted-foreground"><tr><th className="px-3 py-1.5 font-medium">Structure</th><th className="px-2 py-1.5 font-medium">Risk</th><th className="px-2 py-1.5 text-right font-medium">Rec. n</th><th className="px-2 py-1.5 text-right font-medium">Avg R</th><th className="px-2 py-1.5 text-right font-medium">Tracked n</th><th className="px-3 py-1.5 text-right font-medium">Avg R</th></tr></thead>
+              <tbody>
+                {Object.entries(m.by_structure).map(([k, v]) => (
+                  <tr key={k} className="border-t border-border/60" data-testid={`structure-${k}`}>
+                    <td className="px-3 py-1.5 font-medium">{v.label}</td>
+                    <td className="px-2 py-1.5 text-muted-foreground">{v.risk_class === "defined" ? "Defined" : v.risk_class === "open_ended" ? "Can exceed stake" : "Stop-based"}</td>
+                    <td className="mono px-2 py-1.5 text-right">{v.recommended.n}</td>
+                    <td className="mono px-2 py-1.5 text-right">{fmtR(v.recommended.avg_r)}</td>
+                    <td className="mono px-2 py-1.5 text-right">{v.all_tracked.n}</td>
+                    <td className="mono px-3 py-1.5 text-right">{fmtR(v.all_tracked.avg_r)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </section>
       )}

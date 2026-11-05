@@ -12,7 +12,7 @@ import { queryClient } from "@/lib/queryClient";
 import { deleteExecution, upsertExecution } from "@/lib/supabase";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import type { Card, Execution, ExecutionPlan, TodayView } from "@/lib/types";
+import type { AlternativeRow, Card, Execution, ExecutionPlan, RiskClass, TodayView } from "@/lib/types";
 import { fmtEur, fmtPct, fmtPrice, fmtR, fmtUsd, statusLabel, statusTone, fmtDate, fmtDateTime, fmtNum } from "@/lib/format";
 
 /* ------------------------------------------------------------------ small atoms */
@@ -35,6 +35,24 @@ export function Stat({ label, value, sub, tone, className }: { label: React.Reac
       {sub && <div className="text-xs text-muted-foreground">{sub}</div>}
     </div>
   );
+}
+
+export const RISK_CLASS_LABEL: Record<RiskClass, string> = { defined: "Defined risk", stop_based: "Stop-based", open_ended: "Loss can exceed stake" };
+export function RiskClassPill({ rc }: { rc?: RiskClass }) {
+  if (!rc) return null;
+  return <Pill tone={rc === "defined" ? "pos" : rc === "open_ended" ? "neg" : "muted"}><Term k={rc === "defined" ? "defined_risk" : rc === "open_ended" ? "open_ended" : "stop_loss"}>{RISK_CLASS_LABEL[rc]}</Term></Pill>;
+}
+export function riskClassOf(card: Card): RiskClass {
+  return card.risk_class ?? (card.kind === "futures_day" ? "open_ended" : "stop_based");
+}
+export function kindLabel(card: Card) {
+  return card.kind === "futures_day" ? "Day" : card.kind === "option_swing" ? "Option" : "Swing";
+}
+export function ExecutionPill({ execution }: { execution?: Execution }) {
+  if (!execution) return null;
+  if (execution.decision === "executed") return <Pill tone="pos">You executed</Pill>;
+  if (execution.source === "auto") return <Pill tone="muted"><Term k="auto_skip">Auto-skipped</Term></Pill>;
+  return <Pill tone="muted">You skipped</Pill>;
 }
 
 export function useExecutions() {
@@ -68,11 +86,12 @@ export function TradeCard({ card, execution, compact = false }: { card: Card; ex
                 {long ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
                 {long ? "Long" : "Short"}
               </Pill>
-              <Pill tone={card.kind === "futures_day" ? "accent" : "neutral"}>{card.kind === "futures_day" ? "Day" : "Swing"}</Pill>
+              <Pill tone={card.kind === "futures_day" ? "accent" : "neutral"}>{kindLabel(card)}</Pill>
               <Pill tone={card.tier === "tail" ? "accent" : "muted"}>{card.tier === "tail" ? "Tail" : "Base"}</Pill>
-              {execution && <Pill tone={execution.decision === "executed" ? "pos" : "muted"}>{execution.decision === "executed" ? "You executed" : "You skipped"}</Pill>}
+              <ExecutionPill execution={execution} />
             </div>
-            <div className="mt-0.5 truncate text-sm text-muted-foreground">{card.setup_name}</div>
+            <div className="mt-0.5 text-sm font-medium leading-tight" data-testid={`name-${card.id}`}>{card.instrument.name}{card.option ? ` · ${card.option.label.toLowerCase()} ${fmtDate(card.option.expiry)} ${card.option.long_strike}${card.option.short_strike ? `/${card.option.short_strike}` : ""}${card.option.right === "C" ? " C" : " P"}` : ""}</div>
+            <div className="mt-0.5 truncate text-xs text-muted-foreground">{card.setup_name}</div>
           </div>
           <div className="shrink-0 text-right">
             {done ? (
@@ -89,7 +108,7 @@ export function TradeCard({ card, execution, compact = false }: { card: Card; ex
           </div>
         </div>
 
-        {!compact && (
+        {!compact && !card.option && (
           <div className="mt-3 grid grid-cols-4 gap-2 border-t border-border/60 pt-3">
             <Stat label={card.entry_type === "stop" ? "Entry (stop)" : "Entry (limit)"} value={fmtPrice(card.levels.entry, card)} />
             <Stat label="Stop" value={fmtPrice(card.levels.stop, card)} />
@@ -97,10 +116,19 @@ export function TradeCard({ card, execution, compact = false }: { card: Card; ex
             <Stat label="Size" value={unitsText} sub={card.size.units > 0 ? `risk ${fmtEur(card.size.risk_eur)}` : undefined} />
           </div>
         )}
+        {!compact && card.option && (
+          <div className="mt-3 grid grid-cols-4 gap-2 border-t border-border/60 pt-3">
+            <Stat label="Trigger" value={fmtPrice(card.levels.entry, card)} />
+            <Stat label="Premium = max loss" value={fmtUsd(card.option.premium_usd)} tone="neg" />
+            <Stat label="At target" value={fmtUsd(card.option.scenarios_usd.at_target, 0, true)} tone="pos" />
+            <Stat label="Size" value={unitsText} sub={card.size.units > 0 ? `${fmtNum(card.option.premium_pct_of_capital * 100, 1)}% of capital` : undefined} />
+          </div>
+        )}
 
         <div className="mt-3 flex items-center justify-between gap-2">
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
             <StatusPill status={card.status} />
+            <RiskClassPill rc={riskClassOf(card)} />
             {card.analyst.veto && <Pill tone="neg"><ShieldAlert className="h-3 w-3" />Vetoed</Pill>}
             {!card.recommended && !card.analyst.veto && <Pill tone="muted">Shadow</Pill>}
             <span className="whitespace-nowrap">{card.kind === "futures_day" ? `Session ${fmtDate(card.session_date)}` : `Signal ${fmtDate(card.signal_date)}`}</span>
@@ -130,13 +158,14 @@ function CardDetail({ card, execution, open, onOpenChange }: { card: Card; execu
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent side="bottom" className="max-h-[92dvh] overflow-y-auto rounded-t-2xl px-4 pb-8 sm:mx-auto sm:max-w-lg">
         <SheetHeader className="text-left">
-          <SheetTitle className="flex items-center gap-2">
+          <SheetTitle className="flex flex-wrap items-baseline gap-x-2 gap-y-0">
             <span className="mono">{card.instrument.symbol}</span>
             <span className="text-sm font-normal text-muted-foreground">{card.instrument.name}</span>
           </SheetTitle>
           <SheetDescription>
-            {long ? "Long" : "Short"} · {card.setup_name} · {card.kind === "futures_day" ? `session ${fmtDate(card.session_date)}` : `signal ${fmtDate(card.signal_date)}, hold up to ${card.levels.horizon_days} sessions`}
+            {card.option ? `${card.option.label} on ${card.instrument.symbol}` : long ? "Long" : "Short"} · {card.setup_name} · {card.kind === "futures_day" ? `session ${fmtDate(card.session_date)}` : `signal ${fmtDate(card.signal_date)}, hold up to ${card.levels.horizon_days} sessions`}
           </SheetDescription>
+          <div className="flex flex-wrap gap-1 pt-1"><RiskClassPill rc={riskClassOf(card)} /><Pill tone="muted">{STRUCTURE_LABEL[card.structure ?? (card.kind === "futures_day" ? "micro_futures" : "shares")]}</Pill>{card.model_based && <Pill tone="neutral">Model-based estimate</Pill>}</div>
         </SheetHeader>
 
         {!card.recommended && (
@@ -152,7 +181,9 @@ function CardDetail({ card, execution, open, onOpenChange }: { card: Card; execu
           </div>
         )}
 
-        <section className="mt-5">
+        {card.option && <OptionBlock card={card} fx={fx} />}
+
+        {!card.option && <section className="mt-5">
           <h3 className="text-sm font-semibold">Order plan <span className="ml-1 font-normal text-muted-foreground">· <Term k={card.tier === "tail" ? "tail_tier" : "base_tier"}>{card.tier === "tail" ? "Tail trade" : "Base trade"}</Term></span></h3>
           <div className="mt-2 grid grid-cols-3 gap-3 rounded-lg border border-border p-3">
             <Stat label={<Term k={card.entry_type === "stop" ? "stp" : "lmt"}>{card.entry_type === "stop" ? (long ? "Buy stop" : "Sell stop") : (long ? "Buy limit" : "Sell limit")}</Term>} value={fmtPrice(card.levels.entry, card)} />
@@ -166,7 +197,10 @@ function CardDetail({ card, execution, open, onOpenChange }: { card: Card; execu
           <p className="mt-2 text-xs text-muted-foreground">
             Place as a <Term k="bracket">bracket order</Term>: parent {card.entry_type} order with attached stop-loss and take-profit (<Term k="oca">OCA</Term>). <Term k="tif">{card.kind === "futures_day" ? "Day order" : "GTC"}</Term>{card.kind === "futures_day" ? ", flat by 21:55 CET." : " for the entry window, then cancel if unfilled."}
           </p>
-        </section>
+          {riskClassOf(card) === "open_ended" && <p className="mt-1 text-xs text-rose-600 dark:text-rose-400">Futures are margined: a gap through the stop can lose more than the planned risk, and in theory more than the margin posted.</p>}
+        </section>}
+
+        {card.alternatives && card.alternatives.length > 0 && <AlternativesTable rows={card.alternatives} current={card.structure ?? "shares"} />}
 
         {card.execution && <ExecutionGuide plan={card.execution} card={card} />}
 
@@ -232,13 +266,16 @@ function ExecutionGuide({ plan, card }: { plan: ExecutionPlan; card: Card }) {
           <Field k="Quantity" v={String(o.quantity)} />
           <Field k={<Term k={o.order_type === "STP" ? "stp" : "lmt"}>Order type</Term>} v={o.order_type} />
           <Field k={<Term k="tif">Time in force</Term>} v={o.time_in_force} />
-          <Field k={o.order_type === "STP" ? "Stop price" : "Limit price"} v={fmtPrice(o.entry_price, card)} />
+          <Field k={o.order_type === "STP" ? "Stop price" : card.option ? "Limit (net debit / share)" : "Limit price"} v={card.option ? o.entry_price.toFixed(2) : fmtPrice(o.entry_price, card)} />
+          {o.legs?.map((l) => <Field key={`${l.action}${l.strike}`} k={`${l.action === "BUY" ? "Buy" : "Sell"} leg`} v={`${l.strike} ${l.right} ${fmtDate(l.expiry)}`} />)}
           {o.attached.map((a) => <Field key={a.role} k={a.role === "stop_loss" ? "Stop-loss (STP)" : "Profit taker (LMT)"} v={`${a.action} ${fmtPrice(a.price, card)}`} />)}
           <Field k={<Term k="smart">Exchange</Term>} v={plan.instrument.exchange.split(" ")[0]} />
         </div>
+        {o.condition && <p className="mt-2 text-xs font-medium">{o.condition}</p>}
+        {plan.capital.margin_note && <p className="mt-1 text-xs text-muted-foreground">{plan.capital.margin_note}</p>}
         <div className="mt-3 grid grid-cols-3 gap-2 border-t border-border/60 pt-3">
           <Stat label="Max planned loss" value={fmtUsd(plan.risk_reward.max_planned_loss_usd)} tone="neg" sub={`${plan.capital.risk_pct_of_capital}% of capital`} />
-          <Stat label="Planned gain" value={fmtUsd(plan.risk_reward.planned_gain_usd)} tone="pos" sub={`${plan.risk_reward.ratio} : 1`} />
+          <Stat label={card.option ? "Modelled gain at target" : "Planned gain"} value={fmtUsd(plan.risk_reward.planned_gain_usd)} tone="pos" sub={plan.risk_reward.ratio != null ? `${plan.risk_reward.ratio} : 1` : undefined} />
           <Stat label="Est. costs" value={fmtUsd(plan.risk_reward.est_costs_usd)} sub="commission + slippage" />
         </div>
       </div>
@@ -257,6 +294,87 @@ function ExecutionGuide({ plan, card }: { plan: ExecutionPlan; card: Card }) {
         </AccordionItem>
       </Accordion>
       <p className="mt-2 text-xs text-muted-foreground"><Term k="paper">Paper account</Term>: {plan.paper_note}</p>
+    </section>
+  );
+}
+
+export const STRUCTURE_LABEL: Record<string, string> = {
+  shares: "Shares / ETF", long_call: "Long call", long_put: "Long put", debit_spread: "Debit spread",
+  leveraged_etf: "Leveraged ETF", micro_futures: "Micro futures", cfd: "CFD",
+};
+
+/* ------------------------------------------------------------------ option structure block */
+function OptionBlock({ card, fx }: { card: Card; fx: number }) {
+  const o = card.option!;
+  const sc = o.scenarios_usd;
+  return (
+    <section className="mt-5" data-testid="section-option">
+      <h3 className="text-sm font-semibold">Option structure <span className="ml-1 font-normal text-muted-foreground">· <Term k="tail_tier">Tail trade</Term>, <Term k="defined_risk">defined risk</Term></span></h3>
+      <div className="mt-2 rounded-lg border border-border p-3">
+        <div className="mono text-xs">{o.long_contract}{o.short_contract ? ` / ${o.short_contract}` : ""}</div>
+        <div className="mt-2 grid grid-cols-3 gap-3">
+          <Stat label="Structure" value={o.label} sub={`${o.right === "C" ? "call" : "put"}${o.short_strike ? "s" : ""} ${o.long_strike}${o.short_strike ? ` / ${o.short_strike}` : ""}`} />
+          <Stat label="Expiry" value={fmtDate(o.expiry)} sub={<><Term k="dte">{o.dte} DTE</Term></>} />
+          <Stat label={<Term k="delta">Delta / IV</Term>} value={`${o.long_delta.toFixed(2)} / ${fmtNum(o.long_iv * 100, 0)}%`} sub={`OI ${o.quote.open_interest}`} />
+          <Stat label="Underlying trigger" value={fmtPrice(card.levels.entry, card)} sub={`stop ${fmtPrice(card.levels.stop, card)} · target ${fmtPrice(card.levels.target, card)}`} />
+          <Stat label={<Term k="premium">Premium = max loss</Term>} value={fmtUsd(o.premium_usd)} tone="neg" sub={`≈ ${fmtEur(o.premium_usd / fx)} · ${fmtNum(o.premium_pct_of_capital * 100, 1)}% of capital`} />
+          <Stat label={<Term k="breakeven">Breakeven at expiry</Term>} value={fmtPrice(o.breakeven, card)} sub={o.max_gain_usd != null ? `max gain ${fmtUsd(o.max_gain_usd)}` : "gain not capped"} />
+        </div>
+        <div className="mt-3 border-t border-border/60 pt-3">
+          <div className="text-xs text-muted-foreground">Modelled profit or loss of 1 contract, before commission and spread</div>
+          <div className="mt-1 grid grid-cols-3 gap-3">
+            <Stat label="Underlying at target" value={fmtUsd(sc.at_target, 0, true)} tone={sc.at_target >= 0 ? "pos" : "neg"} sub={o.payoff_ratio_at_target != null ? `${o.payoff_ratio_at_target.toFixed(1)}x premium` : undefined} />
+            <Stat label="Underlying at stop" value={fmtUsd(sc.at_stop, 0, true)} tone={sc.at_stop >= 0 ? "pos" : "neg"} sub="sell, do not wait" />
+            <Stat label="Flat at time exit" value={fmtUsd(sc.flat_at_time_exit, 0, true)} tone={sc.flat_at_time_exit >= 0 ? "pos" : "neg"} sub="time decay" />
+          </div>
+        </div>
+        <div className="mt-3 grid grid-cols-3 gap-3 border-t border-border/60 pt-3">
+          <Stat label={<Term k="p_win">P(profit)</Term>} value={fmtPct(o.p_win)} sub={`${o.n_paths} modelled paths`} />
+          <Stat label={<Term k="expectancy">Expectancy</Term>} value={fmtR(o.expectancy_r)} sub="per premium unit" tone={o.expectancy_r >= 0 ? "pos" : "neg"} />
+          <Stat label="Costs" value={fmtR(-o.cost_r)} sub="commission + spread" />
+        </div>
+        {card.size.block_reason && <p className="mt-2 text-xs text-rose-600 dark:text-rose-400">{card.size.block_reason}</p>}
+        <p className="mt-2 text-xs text-muted-foreground">Estimate, not a fact: the underlying's backtested exit paths are priced with Black-Scholes at today's <Term k="iv">implied volatility</Term>. No historical option prices were used, and implied volatility will move. The premium assumes you buy only once the underlying trades through the trigger.</p>
+      </div>
+    </section>
+  );
+}
+
+/* ------------------------------------------------------------------ alternatives compared */
+function AlternativesTable({ rows, current }: { rows: AlternativeRow[]; current: string }) {
+  return (
+    <section className="mt-5" data-testid="section-alternatives">
+      <h3 className="text-sm font-semibold">Ways to express this signal</h3>
+      <p className="mt-1 text-xs text-muted-foreground">The engine compares the share position with defined-risk option structures and with leveraged instruments. The highlighted row is this card.</p>
+      <div className="mt-2 divide-y divide-border/60 rounded-lg border border-border">
+        {rows.map((r, i) => {
+          const isCurrent = r.structure === current && r.chosen !== false;
+          return (
+            <div key={i} className={cn("p-3", isCurrent && "bg-primary/8")}>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span className="text-sm font-medium">{r.label}</span>
+                {r.detail && <span className="mono text-xs text-muted-foreground">{r.detail}</span>}
+                <Pill tone={r.risk_class === "defined" ? "pos" : r.risk_class === "open_ended" ? "neg" : "muted"}>{RISK_CLASS_LABEL[r.risk_class]}</Pill>
+                {isCurrent && <Pill tone="accent">This card</Pill>}
+                {r.fits_budget === false && <Pill tone="neg">Over premium budget</Pill>}
+                {r.generated === false && <Pill tone="muted">Not proposed</Pill>}
+              </div>
+              {r.capital_usd != null || r.max_loss_usd != null || r.max_loss_note ? (
+                <div className="mt-2 grid grid-cols-4 gap-2">
+                  <Stat label="Capital" value={r.capital_usd != null ? fmtUsd(r.capital_usd) : "–"} />
+                  <Stat label="Max loss" value={r.max_loss_usd != null ? fmtUsd(r.max_loss_usd) : r.max_loss_note ?? "–"} tone="neg" />
+                  <Stat label="At target" value={r.gain_at_target_usd != null ? fmtUsd(r.gain_at_target_usd, 0, true) : "–"} tone="pos" />
+                  <Stat label="P(win) · exp." value={r.p_win != null ? fmtPct(r.p_win) : "–"} sub={r.expectancy_r != null ? fmtR(r.expectancy_r) : undefined} />
+                </div>
+              ) : null}
+              {r.note && <p className="mt-2 text-xs text-muted-foreground">{r.note}</p>}
+              {r.evidence && <p className="mt-1 text-[11px] text-muted-foreground">{r.evidence}</p>}
+              {r.permission && <p className="mt-1 text-[11px] text-muted-foreground">IBKR permission: {r.permission}</p>}
+            </div>
+          );
+        })}
+      </div>
+      <p className="mt-1 text-xs text-muted-foreground">Exp. = expectancy per unit of risk (stop distance for shares, premium for options). Rows marked "not proposed" explain why the engine does not generate that instrument.</p>
     </section>
   );
 }
@@ -285,9 +403,9 @@ function DecisionBar({ card, execution }: { card: Card; execution?: Execution })
       const f = parseFloat(fill), e = parseFloat(exit), u = parseFloat(units);
       let pnlEur: number | null = null;
       if (decision === "executed" && Number.isFinite(f) && Number.isFinite(e) && Number.isFinite(u)) {
-        const mult = card.instrument.point_value ?? 1;
-        const sign = card.side === "long" ? 1 : -1;
-        const pnlUsd = sign * (e - f) * mult * u - (card.kind === "futures_day" ? 2.48 * u : 2);
+        const mult = card.option ? 100 : (card.instrument.point_value ?? 1);
+        const sign = card.option ? 1 : card.side === "long" ? 1 : -1; // option fill/exit are debits paid/received per share
+        const pnlUsd = sign * (e - f) * mult * u - (card.kind === "futures_day" ? 2.48 * u : card.option ? 1.3 * u * (card.option.short_strike ? 2 : 1) : 2);
         pnlEur = Math.round((pnlUsd / fx) * 100) / 100;
       }
       const body = {
@@ -315,7 +433,8 @@ function DecisionBar({ card, execution }: { card: Card; execution?: Execution })
   return (
     <section>
       <h3 className="text-sm font-semibold">Your decision</h3>
-      <p className="mt-1 text-xs text-muted-foreground">Record what you actually did. Fill and exit are optional; add them when the trade closes so your personal P&L is exact.</p>
+      <p className="mt-1 text-xs text-muted-foreground">Record what you actually did. Fill and exit are optional; add them when the trade closes so your personal P&L is exact.{card.option ? " For options enter the net debit paid and the net credit received per share." : ""}</p>
+      {execution?.source === "auto" && <p className="mt-1 text-xs text-muted-foreground">Marked skipped automatically{execution.reason ? `: ${execution.reason}` : ""}. Saving a decision here overrides it.</p>}
       <div className="mt-3 grid grid-cols-3 gap-2">
         <label className="text-xs text-muted-foreground">Fill
           <Input inputMode="decimal" value={fill} onChange={(e) => setFill(e.target.value)} placeholder={fmtPrice(card.levels.entry, card)} className="mono mt-1" data-testid="input-fill" />

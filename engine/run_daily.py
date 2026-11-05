@@ -23,6 +23,8 @@ from risk import size_futures, size_stock
 from learn import load_state, save_state, posterior, record_outcome, regime_for, DATA
 import execution
 import supabase_io
+import options
+from risk import capital_usd
 
 CARDS_PATH = os.path.join(DATA, "cards.json")
 TODAY_PATH = os.path.join(DATA, "today.json")
@@ -86,9 +88,39 @@ def score_cards(cards, run_date: date, fx: float):
                 if part != card["status"]:
                     card["status"] = part; changed.append(card)
                 continue
-        _apply_outcome(card, res, fx)
+        if card["kind"] == "option_swing":
+            _apply_option_outcome(card, res, fx, run_date)
+        else:
+            _apply_outcome(card, res, fx)
         changed.append(card)
     return changed
+
+
+def _apply_option_outcome(card, res, fx, run_date):
+    """Option cards follow the underlying's levels; P&L is in units of the premium (= maximum loss)."""
+    status = res["status"]
+    card["status"] = status
+    triggered = status in ("target", "stopped", "expired")
+    o = card["option"]; prem = o["debit_per_share"]
+    if triggered and res.get("exit_price") is not None:
+        m = options.mark(card, float(res["exit_price"]), int(res.get("days") or 0), run_date)
+        value = m["value_per_share"]
+        r_net = (value - prem) / prem - card["size"]["cost_r"]
+        r_net = max(r_net, -1.0)  # cannot lose more than the premium plus costs already included
+        pnl_usd = r_net * o["premium_usd"]
+        src = m["source"]
+    else:
+        value, r_net, pnl_usd, src = None, 0.0, 0.0, None
+    card["outcome"] = {
+        "scored_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "fill": res.get("fill"), "exit_price": res.get("exit_price"), "fill_time": res.get("fill_time"),
+        "exit_time": res.get("exit_time"), "days": res.get("days"),
+        "option_exit_value_per_share": value, "valuation_source": src,
+        "r_gross": round((value - prem) / prem, 3) if value is not None else 0.0, "r_net": round(r_net, 3),
+        "pnl_usd": round(pnl_usd, 2), "pnl_eur": round(pnl_usd / fx, 2),
+        "hit": bool(r_net > 0) if triggered else None,
+        "brier": round((card["prob_success"] - (1 if r_net > 0 else 0)) ** 2, 4) if triggered else None,
+    }
 
 
 def _swing_partial(df, i, lv):
@@ -144,6 +176,8 @@ def make_card(kind, setup_id, data_symbol, instrument, cand, size, post, regime,
         "rationale": rationale, "invalidation": invalidation,
         "analyst": {"note": None, "veto": False},
         "tier": C.SETUPS[setup_id].get("tier", "base"), "rank": None, "signals": [],
+        "structure": "micro_futures" if kind == "futures_day" else "shares",
+        "risk_class": C.STRUCTURES["micro_futures" if kind == "futures_day" else "shares"]["risk_class"],
         "status": "pending", "outcome": None, **(extra or {}),
     }
 
@@ -157,10 +191,17 @@ def gate(card, post, blackout_note):
                 f"(based on {post['prior_n']} historical + {post['live_n']} live outcomes). Tracked for learning only.")
     if card["size"]["units"] < 1:
         return card["size"]["block_reason"]
-    lv = card["levels"]; rr = abs(lv["target"] - lv["entry"]) / max(1e-9, abs(lv["entry"] - lv["stop"]))
-    min_rr = C.TIERS[card["tier"]]["min_rr"]
-    if rr < min_rr - 1e-6:
-        return f"Reward:risk {rr:.2f} is below the {min_rr:.1f} minimum for {card['tier']} trades."
+    if card["kind"] == "option_swing":
+        pr = card["option"].get("payoff_ratio_at_target") or 0
+        if pr < C.OPTIONS["min_rr"] - 1e-6:
+            return f"Payoff at the underlying target is {pr:.1f}x the premium, below the {C.OPTIONS['min_rr']:.1f}x minimum for defined-risk tail trades."
+        if card["option"]["n_paths"] < C.OPTIONS["min_paths"]:
+            return "Too few backtested paths to price the structure."
+    else:
+        lv = card["levels"]; rr = abs(lv["target"] - lv["entry"]) / max(1e-9, abs(lv["entry"] - lv["stop"]))
+        min_rr = C.TIERS[card["tier"]]["min_rr"]
+        if rr < min_rr - 1e-6:
+            return f"Reward:risk {rr:.2f} is below the {min_rr:.1f} minimum for {card['tier']} trades."
     if card["kind"] == "futures_day" and blackout_note:
         return f"Macro blackout: {blackout_note}. Futures day trades are not issued on tier-1 release days."
     return None
@@ -186,7 +227,7 @@ def generate(cards, state, session_date: date, fx: float, vix: float):
             continue
         size = size_futures(spec, cand, fx)
         size["risk_usd_1unit"] = abs(cand["entry"] - cand["stop"]) * spec["point_value"]
-        inst = {"symbol": spec["ibkr"], "name": spec["name"], "type": "futures", "currency": "USD",
+        inst = {"symbol": spec["ibkr"], "name": C.INSTRUMENT_NAMES.get(spec["ibkr"], spec["name"]), "type": "futures", "currency": "USD",
                 "point_value": spec["point_value"], "tick": spec["tick"]}
         rationale = [
             f"Prior RTH session ({lv['prev_session']}): high {lv['pdh']:.2f}, low {lv['pdl']:.2f}; "
@@ -233,7 +274,7 @@ def generate(cards, state, session_date: date, fx: float, vix: float):
             tier = C.SETUPS[sid].get("tier", "base")
             size = size_stock(cand, fx, tier=tier)
             size["risk_usd_1unit"] = cand["entry"] - cand["stop"]
-            inst = {"symbol": sym, "name": sym, "type": "etf" if sym in C.SWING_UNIVERSE[:12] else "stock",
+            inst = {"symbol": sym, "name": C.INSTRUMENT_NAMES.get(sym, sym), "type": "etf" if sym in C.SWING_UNIVERSE[:12] else "stock",
                     "currency": "USD"}
             a = float(last["atr14"])
             rationale = [
@@ -257,6 +298,13 @@ def generate(cards, state, session_date: date, fx: float, vix: float):
             card["signals"] = (["rsi2_oversold", "above_sma50", "above_sma200"] if sid == "SWING_PULLBACK"
                                else ["20d_high", "volume_1.5x", "above_sma50"]) + [regime]
             if card["id"] in existing:
+                # share card already stored (earlier run today): still make sure its defined-risk twin exists
+                if sid == "SWING_BREAKOUT_RUNNER":
+                    stored = next(c for c in cards if c["id"] == card["id"])
+                    if stored["status"] in ("pending", "open") and "alternatives" not in stored:
+                        oc = option_card(stored, cand, state, session_date, signal_date, fx, vix, regime, existing, inst)
+                        if oc:
+                            new.append(oc)
                 continue
             reason = gate(card, post, None)
             if blackout and reason is None:
@@ -264,12 +312,121 @@ def generate(cards, state, session_date: date, fx: float, vix: float):
             card["recommended"] = reason is None
             card["shadow_reason"] = reason
             new.append(card)
+            if sid == "SWING_BREAKOUT_RUNNER":
+                oc = option_card(card, cand, state, session_date, signal_date, fx, vix, regime, existing, inst)
+                if oc:
+                    new.append(oc)
 
     # ---- discretionary proposals from the analyst review (EVENT_SCOUT)
     new += event_proposals(cards, state, session_date, fx, vix, regime, existing)
 
     allocate(new, cards, session_date)
     return new
+
+
+def option_posterior(state, model: dict, regime: str):
+    """Blend the model-based estimate for this structure (pseudo-count OPTIONS.model_prior_strength) with the
+    live record of OPT_RUNNER cards. Returns the same shape as learn.posterior."""
+    bucket = state["setups"].setdefault("OPT_RUNNER", {})
+    s_all = bucket.setdefault("all", {"prior_n": 0, "prior_p": model["p_win"], "prior_win_r": model["win_r"],
+                                      "prior_loss_r": model["loss_r"], "prior_trigger_rate": None, "prior_signals": 0,
+                                      "live_n": 0, "live_hits": 0, "live_win_r_sum": 0.0, "live_loss_r_sum": 0.0,
+                                      "live_wins": 0, "live_losses": 0, "live_r_sum": 0.0, "status": "active"})
+    k = C.OPTIONS["model_prior_strength"]
+    p = (k * model["p_win"] + s_all["live_hits"]) / (k + s_all["live_n"])
+    win_r = (k * model["win_r"] + s_all["live_win_r_sum"]) / (k + s_all["live_wins"])
+    loss_r = (k * model["loss_r"] + s_all["live_loss_r_sum"]) / (k + s_all["live_losses"])
+    return {"p": p, "win_r": win_r, "loss_r": loss_r, "expectancy_r": p * win_r + (1 - p) * loss_r,
+            "live_n": s_all["live_n"], "prior_n": model["n_paths"], "status": s_all["status"], "regime_used": "model"}
+
+
+def option_card(stock_card, cand, state, session_date, signal_date, fx, vix, regime, existing, inst):
+    """Build the defined-risk alternative to a runner card and attach the structure comparison to both cards."""
+    sym = stock_card["data_symbol"]
+    paths = state.get("path_samples", {}).get("SWING_BREAKOUT_RUNNER")
+    cap = capital_usd(fx)
+    ev = options.evaluate(sym, cand, paths, date.today(), cap)
+    comparison = structure_comparison(stock_card, ev, cap)
+    stock_card["alternatives"] = comparison
+    if not ev:
+        return None
+    ch = ev["chosen"]
+    post = option_posterior(state, ch, regime)
+    prem = ch["premium_usd"]
+    block = None if ch["fits_budget"] else (f"Premium ${prem:,.0f} exceeds the defined-risk budget of ${ev['max_premium_usd']:,.0f} "
+                                            f"({C.OPTIONS['max_premium_pct']*100:.0f}% of capital). No trade at this size.")
+    size = {"units": 1 if ch["fits_budget"] else 0, "unit_label": "contract(s)", "risk_usd": prem if ch["fits_budget"] else 0,
+            "risk_eur": prem / fx if ch["fits_budget"] else 0, "cost_r": ch["cost_r"], "notional_usd": prem,
+            "block_reason": block, "risk_usd_1unit": prem, "risk_pct_of_capital": prem / cap if ch["fits_budget"] else 0,
+            "notional_pct_of_capital": prem / cap, "tier": "tail"}
+    o_inst = {"symbol": sym, "name": C.INSTRUMENT_NAMES.get(sym, sym), "type": "option",
+              "underlying_type": inst["type"], "currency": "USD", "multiplier": 100}
+    lbl = ch["label"].lower()
+    strikes = (f"{ch['long_strike']:g}/{ch['short_strike']:g}" if ch["short_strike"] else f"{ch['long_strike']:g}")
+    rationale = [
+        f"Same breakout signal as the share runner ({signal_date} close {stock_card['levels'].get('entry', 0) - 0:.2f} trigger {cand['entry']:.2f}), "
+        f"expressed as a {lbl}: {sym} {ch['expiry']} {strikes} {'call' if ch['right']=='C' else 'put'}{'s' if ch['short_strike'] else ''}, "
+        f"{ch['dte']} days to expiry, delta {ch['long_delta']:.2f}, implied volatility {ch['long_iv']*100:.0f}%.",
+        f"Maximum loss is the premium, about ${prem:,.0f} ({ch['premium_pct_of_capital']*100:.1f}% of capital), whatever the underlying does. "
+        f"Modelled value if the underlying reaches the target {cand['target']:.2f}: {ch['scenarios_usd']['at_target']:+,.0f} USD "
+        f"({ch['payoff_ratio_at_target']:.1f}x the premium); at the stop {cand['stop']:.2f}: {ch['scenarios_usd']['at_stop']:+,.0f} USD; "
+        f"flat at the time exit: {ch['scenarios_usd']['flat_at_time_exit']:+,.0f} USD.",
+        f"Priced along {ch['n_paths']} backtested runner exits: P(profit) {ch['p_win']*100:.0f}%, expectancy {ch['expectancy_r']:+.2f} per premium unit after costs. "
+        f"Model-based (constant implied volatility); no historical option prices exist for free, so this is an estimate.",
+        f"VIX {vix:.1f} -> {regime.replace('_', ' ')} regime.",
+    ]
+    invalidation = [
+        f"Underlying does not trade above {cand['entry']:.2f} within {cand['trigger_days']} session(s): do not buy the option.",
+        f"Underlying opens more than half the stop distance beyond {cand['entry']:.2f}: skip, the premium will have repriced.",
+        f"Option ask more than 15% above ${ch['debit_per_share']:.2f} when the trigger prints: skip (edge gone to the price).",
+        f"Underlying trades at the stop {cand['stop']:.2f}: sell the structure at market and take the partial loss; do not hold hoping for expiry.",
+        f"Underlying reaches {cand['target']:.2f} or {cand['horizon_days']} sessions pass: sell the structure. Never hold into the last 2 weeks before expiry.",
+    ]
+    lv = {**cand, "option_debit_limit": ch["debit_per_share"]}
+    card = make_card("option_swing", "OPT_RUNNER", sym, o_inst, lv, size, post, regime, session_date, signal_date,
+                     rationale, invalidation, {"structure": ch["structure"], "risk_class": "defined",
+                                               "option": {k: v for k, v in ch.items() if k not in ("fits_budget",)},
+                                               "alternatives": comparison, "model_based": True})
+    card["option"]["short_iv"] = None
+    card["expected_gain_usd"] = round(post["win_r"] * prem, 2); card["expected_loss_usd"] = round(post["loss_r"] * prem, 2)
+    card["signals"] = list(stock_card["signals"]) + ["defined_risk"]
+    if card["id"] in existing:
+        return None
+    reason = gate(card, post, None)
+    card["recommended"] = reason is None
+    card["shadow_reason"] = reason
+    return card
+
+
+def structure_comparison(stock_card, ev, cap):
+    """Side-by-side of the ways to express the signal. Numbers for shares come from the stock card; option numbers
+    from the chain model; leveraged ETF and CFD are described, not generated (see config.STRUCTURES)."""
+    sz = stock_card["size"]; lv = stock_card["levels"]
+    rr = abs(lv["target"] - lv["entry"]) / max(1e-9, abs(lv["entry"] - lv["stop"]))
+    rows = [{
+        "structure": "shares", "label": C.STRUCTURES["shares"]["label"], "risk_class": "stop_based",
+        "capital_usd": round(sz["notional_usd"], 2), "max_loss_usd": round(sz["risk_usd"] if sz["units"] else sz["risk_usd_1unit"], 2),
+        "max_loss_note": "at the stop; a gap can exceed it", "gain_at_target_usd": round((sz["risk_usd"] if sz["units"] else sz["risk_usd_1unit"]) * rr, 2),
+        "p_win": stock_card["prob_success"], "expectancy_r": stock_card["expectancy_r"], "evidence": "backtest + live",
+        "permission": C.STRUCTURES["shares"]["permission"], "generated": True,
+    }]
+    if ev:
+        for t in ev["table"]:
+            rows.append({"structure": t["structure"], "label": t["label"], "risk_class": "defined",
+                         "detail": f"{t['expiry']} {t['long_strike']:g}" + (f"/{t['short_strike']:g}" if t["short_strike"] else "") + (" C" if t["right"] == "C" else " P"),
+                         "capital_usd": t["premium_usd"], "max_loss_usd": t["max_loss_usd"], "max_loss_note": "premium, fixed",
+                         "gain_at_target_usd": t["scenarios_usd"]["at_target"], "p_win": round(t["p_win"], 3),
+                         "expectancy_r": round(t["expectancy_r"], 3), "evidence": "model (paths x Black-Scholes)",
+                         "permission": C.STRUCTURES[t["structure"]]["permission"], "generated": True,
+                         "fits_budget": t["fits_budget"], "chosen": t is ev["chosen"]})
+    else:
+        rows.append({"structure": "long_call", "label": C.STRUCTURES["long_call"]["label"], "risk_class": "defined",
+                     "generated": False, "note": "No liquid contract in the 55-100 day window, or underlying has no listed options."})
+    rows.append({"structure": "leveraged_etf", "label": C.STRUCTURES["leveraged_etf"]["label"], "risk_class": "stop_based",
+                 "generated": False, "note": C.STRUCTURES["leveraged_etf"]["note"], "permission": C.STRUCTURES["leveraged_etf"]["permission"]})
+    rows.append({"structure": "cfd", "label": C.STRUCTURES["cfd"]["label"], "risk_class": "open_ended",
+                 "generated": False, "note": C.STRUCTURES["cfd"]["note"], "permission": C.STRUCTURES["cfd"]["permission"]})
+    return rows
 
 
 def cluster_of(sym):
@@ -289,12 +446,29 @@ def allocate(new, cards, session_date):
                  and c["session_date"] != str(session_date)]
     open_by_tier = {"base": 0, "tail": 0}
     risk_by_tier = {"base": 0.0, "tail": 0.0}
+    defined_open, defined_prem = 0, 0.0
     cluster_count = {}
     for c in open_prev:
-        open_by_tier[c["tier"]] += 1
-        risk_by_tier[c["tier"]] += c["size"].get("risk_pct_of_capital", 0)
+        if c.get("risk_class") == "defined":
+            defined_open += 1; defined_prem += c["size"].get("risk_pct_of_capital", 0)
+        else:
+            open_by_tier[c["tier"]] += 1
+            risk_by_tier[c["tier"]] += c["size"].get("risk_pct_of_capital", 0)
         for k in cluster_of(c["data_symbol"]):
             cluster_count[k] = cluster_count.get(k, 0) + 1
+    # one structure per signal: when a share card and an option card express the same signal, keep the one with
+    # the higher expectancy per unit of maximum loss; the other is tracked in shadow for comparison
+    by_sym = {}
+    for c in new:
+        if c["recommended"] and c["tier"] == "tail":
+            by_sym.setdefault(c["data_symbol"], []).append(c)
+    for sym, cs in by_sym.items():
+        if len(cs) > 1:
+            cs.sort(key=lambda c: -c["expectancy_r"])
+            for loser in cs[1:]:
+                loser["recommended"] = False
+                loser["shadow_reason"] = (f"Same signal expressed as {C.STRUCTURES[cs[0]['structure']]['label'].lower()} ranked higher "
+                                          f"({cs[0]['expectancy_r']:+.2f} vs {loser['expectancy_r']:+.2f} per unit of maximum loss). Tracked in shadow for comparison.")
     fut_n = swing_n = 0
     symbols_taken = set()
     for c in new:
@@ -302,6 +476,28 @@ def allocate(new, cards, session_date):
             continue
         t = c["tier"]; tier_cfg = C.TIERS[t]
         reason = None
+        if c.get("risk_class") == "defined":
+            prem_pct = c["size"].get("risk_pct_of_capital", 0)
+            if defined_open >= C.OPTIONS["max_open"]:
+                reason = f"Defined-risk cap: {C.OPTIONS['max_open']} option positions already open."
+            elif defined_prem + prem_pct > C.OPTIONS["max_total_premium_pct"] + 1e-9:
+                reason = f"Defined-risk budget ({C.OPTIONS['max_total_premium_pct']*100:.0f}% of capital in premium) would be exceeded."
+            elif c["data_symbol"] in symbols_taken:
+                reason = "Same instrument already recommended today."
+            else:
+                for k in cluster_of(c["data_symbol"]):
+                    if cluster_count.get(k, 0) >= C.MAX_CORRELATED_POSITIONS:
+                        reason = f"Correlation cap: already {C.MAX_CORRELATED_POSITIONS} positions in the '{k}' cluster."
+                        break
+            if reason:
+                c["recommended"] = False
+                c["shadow_reason"] = reason + " Tracked in shadow only."
+                continue
+            defined_open += 1; defined_prem += prem_pct; symbols_taken.add(c["data_symbol"])
+            for k in cluster_of(c["data_symbol"]):
+                cluster_count[k] = cluster_count.get(k, 0) + 1
+            swing_n += 1
+            continue
         if c["kind"] == "futures_day" and fut_n >= C.MAX_FUTURES_CARDS:
             reason = "Daily futures card cap reached."
         elif c["kind"] == "swing" and swing_n >= C.MAX_SWING_CARDS + 1:
@@ -422,7 +618,11 @@ def compute_metrics(cards, fx, executions=None):
     by_tier = {t: {"recommended": _summary([c for c in rec_done if c["tier"] == t]),
                    "all_tracked": _summary([c for c in done if c["tier"] == t])} for t in C.TIERS}
     by_regime = {r: _summary([c for c in done if c["regime"] == r]) for _, _, r in C.VIX_REGIMES}
-    by_kind = {k: _summary([c for c in done if c["kind"] == k]) for k in ("futures_day", "swing")}
+    by_kind = {k: _summary([c for c in done if c["kind"] == k]) for k in ("futures_day", "swing", "option_swing")}
+    by_structure = {k: {"label": v["label"], "risk_class": v["risk_class"],
+                        "recommended": _summary([c for c in rec_done if c.get("structure") == k]),
+                        "all_tracked": _summary([c for c in done if c.get("structure") == k])}
+                    for k, v in C.STRUCTURES.items() if v["generated"]}
     # signal combinations (setup x regime x side) with n >= 5
     combos = {}
     for c in done:
@@ -456,6 +656,9 @@ def compute_metrics(cards, fx, executions=None):
     # ---- executed vs skipped (user decisions)
     executed = [c for c in done if ex_by.get(c["id"], {}).get("decision") == "executed"]
     skipped = [c for c in done if ex_by.get(c["id"], {}).get("decision") == "skipped"]
+    skipped_auto = [c for c in skipped if ex_by[c["id"]].get("source") == "auto"]
+    skipped_user = [c for c in skipped if ex_by[c["id"]].get("source") != "auto"]
+    all_skipped_rows = [e for e in executions if e["decision"] == "skipped"]
     undecided_rec = [c for c in rec_done if c["id"] not in ex_by]
     ex_with_pnl = [ex_by[c["id"]] for c in executed if ex_by[c["id"]].get("pnlEur") is not None]
     own_pnl = float(sum(e["pnlEur"] for e in ex_with_pnl))
@@ -470,6 +673,19 @@ def compute_metrics(cards, fx, executions=None):
     decisions = {
         "executed": _summary(executed), "skipped": _summary(skipped),
         "executed_count": len(executed), "skipped_count": len(skipped), "undecided_recommended": len(undecided_rec),
+        "skipped_auto_count": len(skipped_auto), "skipped_user_count": len(skipped_user),
+        "skipped_auto": _summary(skipped_auto), "skipped_user": _summary(skipped_user),
+        "skipped_total_rows": len(all_skipped_rows),
+        "skipped_reasons": {r: sum(1 for e in all_skipped_rows if (e.get("reason") or "user decision") == r)
+                            for r in sorted({(e.get("reason") or "user decision") for e in all_skipped_rows})},
+        "missed_opportunities": sorted([{"id": c["id"], "symbol": c["instrument"]["symbol"], "name": c["instrument"]["name"], "setup_id": c["setup_id"], "session_date": c["session_date"], "status": c["status"], "r_net": c["outcome"]["r_net"],
+                                         "pnl_eur": c["outcome"]["pnl_eur"], "source": ex_by[c["id"]].get("source", "user"),
+                                         "reason": ex_by[c["id"]].get("reason")}
+                                        for c in skipped if c["outcome"]["r_net"] > 0.25], key=lambda x: -x["r_net"])[:10],
+        "avoided_losses": sorted([{"id": c["id"], "symbol": c["instrument"]["symbol"], "name": c["instrument"]["name"], "setup_id": c["setup_id"], "session_date": c["session_date"], "status": c["status"], "r_net": c["outcome"]["r_net"],
+                                   "pnl_eur": c["outcome"]["pnl_eur"], "source": ex_by[c["id"]].get("source", "user"),
+                                   "reason": ex_by[c["id"]].get("reason")}
+                                  for c in skipped if c["outcome"]["r_net"] < -0.25], key=lambda x: x["r_net"])[:10],
         "own_pnl_eur": own_pnl, "system_pnl_same_cards_eur": sys_pnl_same, "n_with_own_pnl": len(ex_with_pnl),
         "execution_slippage_eur": own_pnl - sys_pnl_same if ex_with_pnl else None,
         "skipped_winners_r": float(sum(c["outcome"]["r_net"] for c in skipped if c["outcome"]["r_net"] > 0)),
@@ -483,7 +699,7 @@ def compute_metrics(cards, fx, executions=None):
     }
     return {"generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "recommended": _summary(rec_done), "all_tracked": _summary(done), "by_setup": by_setup,
-            "by_tier": by_tier, "by_regime": by_regime, "by_kind": by_kind, "signal_combos": signal_combos,
+            "by_tier": by_tier, "by_regime": by_regime, "by_kind": by_kind, "by_structure": by_structure, "signal_combos": signal_combos,
             "predicted_vs_realised": pred_vs_real, "decisions": decisions,
             "equity_curve": curve, "calibration": calib, "fx_eurusd": fx,
             "capital_eur": C.CAPITAL_EUR, "counts": {"total_cards": len(cards),
@@ -524,6 +740,32 @@ def _bias_flags(executed, skipped, ex_by):
     return flags or [{"flag": "none", "text": "No decision bias detected at the current sample size."}]
 
 
+# ---------------------------------------------------------------- trade lifecycle: automatic classification
+AUTO_SKIP_REASONS = {
+    "open": "triggered without a recorded execution", "target": "triggered without a recorded execution",
+    "stopped": "triggered without a recorded execution", "expired": "triggered without a recorded execution",
+    "not_triggered": "order window passed without a fill (no action was possible)",
+    "gap_cancelled": "gap-through cancel rule applied", "vetoed": "vetoed in the analyst review",
+}
+
+
+def auto_classify(cards, executions, session_date):
+    """Every refresh: a previously recommended card with no recorded decision is marked 'skipped' (source=auto)
+    unless it is still actionable, i.e. still pending inside its order window and therefore still shown
+    under open positions. Rows are only inserted where none exist, so a user decision is never overwritten."""
+    have = {e["cardId"] for e in executions}
+    rows = []
+    for c in cards:
+        if not c["recommended"] or c["id"] in have or c["session_date"] >= str(session_date):
+            continue
+        if c["status"] == "pending":
+            continue  # still valid and still listed: actionable
+        rows.append({"card_id": c["id"], "decision": "skipped", "source": "auto",
+                     "reason": AUTO_SKIP_REASONS.get(c["status"], "no longer actionable"),
+                     "note": f"Auto-classified on {session_date}: {AUTO_SKIP_REASONS.get(c['status'], 'no longer actionable')}."})
+    return rows
+
+
 # ---------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser()
@@ -541,6 +783,10 @@ def main():
     state = load_state()
     for c in cards:  # backfill fields for cards created before the two-tier release
         c.setdefault("tier", C.SETUPS.get(c["setup_id"], {}).get("tier", "base"))
+        c.setdefault("structure", "micro_futures" if c["kind"] == "futures_day" else "shares")
+        c.setdefault("risk_class", C.STRUCTURES[c["structure"]]["risk_class"])
+        if c["instrument"].get("name") in (None, c["instrument"]["symbol"]):
+            c["instrument"]["name"] = C.INSTRUMENT_NAMES.get(c["instrument"]["symbol"], c["instrument"]["symbol"])
         c.setdefault("rank", None); c.setdefault("signals", [])
         c["size"].setdefault("tier", c["tier"])
         c["size"].setdefault("risk_pct_of_capital", (c["size"]["risk_usd"] / (C.CAPITAL_EUR * fx)) if c["size"]["units"] else 0)
@@ -565,8 +811,13 @@ def main():
     if supabase_io.enabled():
         try:
             executions = supabase_io.read_executions()
+            auto_rows = auto_classify(cards, executions, session_date)
+            if auto_rows:
+                supabase_io.upsert_executions(auto_rows)
+                executions = supabase_io.read_executions()
+                print(f"auto-classified {len(auto_rows)} card(s) as skipped", file=sys.stderr)
         except Exception as e:  # noqa
-            print(f"warning: could not read executions from Supabase: {e}", file=sys.stderr)
+            print(f"warning: executions sync with Supabase failed: {e}", file=sys.stderr)
     metrics = compute_metrics(cards, fx, executions)
     with open(METRICS_PATH, "w") as f:
         json.dump(metrics, f, indent=1, default=str)
@@ -582,7 +833,10 @@ def main():
         "blackout": blackout, "upcoming_events": upcoming, "market_context": market_context,
         "recommended": sorted([c for c in todays if c["recommended"]], key=lambda c: c["rank"] or 999),
         "shadow": sorted([c for c in todays if not c["recommended"]], key=lambda c: c["rank"] or 999),
-        "tiers": C.TIERS, "pdt_applies": C.PDT_APPLIES,
+        "tiers": C.TIERS, "pdt_applies": C.PDT_APPLIES, "structures": C.STRUCTURES,
+        "options_budget": {"max_premium_pct": C.OPTIONS["max_premium_pct"], "max_total_premium_pct": C.OPTIONS["max_total_premium_pct"],
+                           "max_open": C.OPTIONS["max_open"], "min_rr": C.OPTIONS["min_rr"],
+                           "max_premium_eur": round(C.CAPITAL_EUR * C.OPTIONS["max_premium_pct"], 0)},
         "open_positions": open_cards,
         "scored_today": [c["id"] for c in changed],
         "limits": {"risk_per_trade_pct": C.RISK_PER_TRADE_PCT, "risk_per_trade_fut_pct": C.RISK_PER_TRADE_FUT_PCT,
