@@ -1,0 +1,15 @@
+# secrets
+.env
+engine/.env
+web/.env
+web/.env.*
+# local data cache (source of truth is Supabase)
+data/
+# old Express app (kept locally for reference only)
+app/
+# build artefacts
+node_modules/
+dist/
+__pycache__/
+*.pyc
+server.log

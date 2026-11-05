@@ -1,0 +1,39 @@
+name: engine
+
+on:
+  schedule:
+    # 06:30 and 13:30 UTC on weekdays ≈ 07:30 / 14:30 Berlin (CET). GitHub cron can be delayed by up to ~1 h.
+    - cron: "30 6,13 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      no_generate:
+        description: "Only score / refresh existing cards, do not generate new ones"
+        type: boolean
+        default: false
+
+concurrency:
+  group: engine
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r engine/requirements.txt
+      - name: Run engine
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          ENGINE_SECRET: ${{ secrets.ENGINE_SECRET }}
+        run: |
+          if [ "${{ inputs.no_generate }}" = "true" ]; then
+            bash engine/morning.sh --no-generate
+          else
+            bash engine/morning.sh
+          fi
